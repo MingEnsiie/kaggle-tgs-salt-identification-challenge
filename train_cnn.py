@@ -39,8 +39,7 @@ def model_fn():
     def _model_fn(features, labels, mode, params):
 
         batch_image = tf.map_fn(preproc,features['image'],tf.float32)
-
-        tf.logging.info('Input shape : {}'.format(batch_image.get_shape()))
+        tf.logging.info("Input batch shape: {}".format(batch_image.get_shape()))
 
         is_training = mode == tf.estimator.ModeKeys.TRAIN
 
@@ -62,9 +61,9 @@ def model_fn():
             net = _conv(net, 64, (3, 3), FLAGS.reg_val)
             net = _conv(net, 32, (3, 3), FLAGS.reg_val)
             net = _conv(net, 16, (3, 3), FLAGS.reg_val)
-            net = _conv(net, 1, (3, 3), FLAGS.reg_val)
-            net = _conv(net, 1, (1, 1), FLAGS.reg_val)
-            net = tf.sigmoid(net)
+            net = _conv(net, 2, (3, 3), FLAGS.reg_val)
+            net = _conv(net, 2, (1, 1), FLAGS.reg_val)
+            #net = tf.sigmoid(net)
 
         predicted_mask = net
         prediction_dict = {"predicted_mask": predicted_mask}
@@ -77,26 +76,33 @@ def model_fn():
         export_outputs = None
 
         if mode != tf.estimator.ModeKeys.PREDICT:
-
+            
             batch_mask = tf.map_fn(preproc,labels['mask'],tf.float32)
-
+            tf.logging.info("Mask batch shape: {}".format(batch_mask.get_shape()))
+            
+            batch_neg = 1+tf.negative(batch_mask)            
+            batch_mask_plus_neg = tf.squeeze(tf.stack([batch_mask,batch_neg],axis=3),axis=4)
+            
             # IT IS VERY IMPORTANT TO RETRIEVE THE REGULARIZATION LOSSES
             reg_loss = tf.losses.get_regularization_loss()
 
             # This summary is automatically caught by the Estimator API
             tf.summary.scalar("Regularization_Loss", tensor=reg_loss)
 
-            loss = tf.losses.mean_squared_error(
-                batch_mask, predicted_mask)
-            tf.summary.scalar("MSE_LOSS", tensor=loss)
+            reshape_net = net
+            reshape_mask = batch_mask_plus_neg            
+            loss = tf.losses.softmax_cross_entropy(onehot_labels=reshape_mask,logits=reshape_net)
+        
+            tf.summary.scalar("XEntropy_LOSS", tensor=loss)
 
             total_loss = loss + reg_loss
 
             learning_rate = tf.constant(
                 FLAGS.learning_rate, name='fixed_learning_rate')
-            optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+            #optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+            optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
             vars_to_train = tf.trainable_variables()
-            tf.logging.info("Variables to train: {}".format(vars_to_train))
+            tf.logging.info("Variables to train: {}".format(vars_to_train))            
 
             if is_training:
                 # You DO must get this collection in order to perform updates on batch_norm variables
@@ -105,12 +111,13 @@ def model_fn():
                     train_op = optimizer.minimize(
                         loss=total_loss, global_step=tf.train.get_global_step(), var_list=vars_to_train)
 
-            eval_metric_ops = metrics(batch_mask, predicted_mask)
+            eval_metric_ops = metrics(batch_mask_plus_neg, predicted_mask)
 
-        else:
-            # read labels file to output predictions as string
+        else:            
             export_outputs = {'predicted_mask': tf.estimator.export.PredictOutput(
                 outputs=predicted_mask)}
+            #export_outputs = None
+            
 
         return tf.estimator.EstimatorSpec(
             mode=mode,
@@ -126,7 +133,7 @@ def model_fn():
 def preproc(image_bytes):
     image_png = tf.to_float(tf.image.decode_png(
         image_bytes, channels=1)) / 255.0
-    image_png = tf.reshape(image_png, [IMAGE_SIZE, IMAGE_SIZE, 1])
+    image_png = tf.reshape(image_png, [IMAGE_SIZE, IMAGE_SIZE, 1],name="Reshape_Preproc")
 
     return image_png
 
@@ -165,12 +172,15 @@ def input_fn(metadata, batch_prefetch, batch_size, epochs):
 
 def metrics(predicted_mask, target_mask):
 
-    round_predicted_mask = tf.round(predicted_mask)
+    round_predicted_mask = tf.argmax(predicted_mask,axis=3)
+    round_target_mask = tf.argmax(target_mask,axis=3)
 
-    mask_sum = round_predicted_mask + target_mask
+    tf.logging.info("SHAPE {} \n\n".format(round_predicted_mask.get_shape()))
+
+    mask_sum = round_predicted_mask + round_target_mask
     intersection = tf.reduce_sum(tf.cast(tf.equal(mask_sum, 2), tf.float32))
     union = tf.reduce_sum(tf.cast(tf.greater_equal(mask_sum, 1), tf.float32))
-    _iou = intersection / union
+    _iou = (intersection / union)/FLAGS.batch_size
     iou_val = tf.get_variable('iou', trainable=False, validate_shape=True,
                               dtype=tf.float32, initializer=tf.constant(0, dtype=tf.float32))
     iou_op = iou_val.assign(iou_val + _iou)
@@ -214,7 +224,7 @@ def train_tgs():
 
     session_config = tf.ConfigProto(
         allow_soft_placement=True,
-        log_device_placement=True
+        log_device_placement=False
     )
     #session_config = None
 
@@ -222,7 +232,7 @@ def train_tgs():
         model_dir=output_dir,
         save_summary_steps=100,
         session_config=session_config,
-        save_checkpoints_steps=100,
+        save_checkpoints_steps=1000,
         save_checkpoints_secs=None,
         keep_checkpoint_max=5
     )
@@ -246,7 +256,7 @@ def train_tgs():
         input_fn=eval_input_fn,
         steps=eval_steps,
         start_delay_secs=30,
-        throttle_secs=60)
+        throttle_secs=300)
 
     tf.estimator.train_and_evaluate(
         estimator=estimator, train_spec=train_spec, eval_spec=eval_spec)
