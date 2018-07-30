@@ -32,7 +32,7 @@
 --model_dir ./trained_models/v1/ \
 --train_metadata ../data/train/tf-records/train* \
 --eval_metadata ../data/train/tf-records/eval* \
---total_steps 10000 \
+--total_steps 100000 \
 --batch_size 32 \
 --learning_rate 1e-4 \
 --reg_val 1e-4 \
